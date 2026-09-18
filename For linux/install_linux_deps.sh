@@ -203,14 +203,14 @@ else
     echo -e "  ${YELLOW}⚠️  ffprobe not found${NC} — MP4 files will be moved without a thumbnail"
 fi
 
-# ── KDE Wayland note ────────────────────────────────────────────────────────
+# ── Update check ────────────────────────────────────────────────────────────
 
 echo ""
-echo -e "${CYAN}── KDE Plasma / Wayland ──${NC}"
-if command -v gdbus &>/dev/null; then
-    echo -e "  ${GREEN}✅ gdbus${NC} — available (KDE Wayland window detection will work)"
+echo -e "${CYAN}── Update Check ──${NC}"
+if command -v curl &>/dev/null || command -v wget &>/dev/null; then
+    echo -e "  ${GREEN}✅ curl / wget${NC} — available (the script can tell you about new versions)"
 else
-    echo -e "  ${YELLOW}ℹ️  gdbus not found${NC} — KDE Wayland detection unavailable (X11 still works)"
+    echo -e "  ${YELLOW}ℹ️  neither curl nor wget found${NC} — update check unavailable, everything else still works"
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────────────

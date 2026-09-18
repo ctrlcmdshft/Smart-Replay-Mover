@@ -1,7 +1,7 @@
--- Smart Replay Mover v2.16.0
+-- Smart Replay Mover v2.20.0
 -- Simple, safe, and reliable replay buffer organizer for OBS
 -- ============================================================================
-local VERSION = "2.16.0"
+local VERSION = "2.20.0"
 local GITHUB_RAW_URL = "https://raw.githubusercontent.com/SlonickLab/Smart-Replay-Mover/main/Smart%20Replay%20Mover.lua"
 local GITHUB_RELEASES_URL = "https://github.com/SlonickLab/Smart-Replay-Mover/releases"
 --
@@ -32,6 +32,40 @@ local GITHUB_RELEASES_URL = "https://github.com/SlonickLab/Smart-Replay-Mover/re
 -- Plagiarism or removal of this notice violates the license terms.
 --
 -- ============================================================================
+-- CHANGELOG v2.20.0:
+--   - NEW: "Smart Add Chapter Marker" hotkey. It places a chapter marker and shows a
+--         notification, including why a marker was not added: not recording, paused, a
+--         recording format without chapter support, or OBS older than 30.2. OBS gives
+--         scripts no event for its own chapter hotkey, so this one is used instead
+--         (Issue #38, thanks @Besdroxk)
+--   - NEW: The update check works on Linux through curl or wget, and the download button
+--         opens the releases page with xdg-open. Linux users were never told about new
+--         versions before (Issue #37, thanks @TheFloatingCloud40)
+--   - FIX: A clip could overwrite an existing one when its path was close to the 260
+--         character limit and the name was already taken. That case now leaves the file in
+--         place, and truncation keeps room for the " (2)" suffix wherever the folder depth
+--         allows it
+--   - FIX: A failed move was always reported as a success. os_rename returns 0 on success
+--         and -1 on failure, and Lua treats both as true, so a replay could stay in the OBS
+--         folder under a "Clip Saved" notification and the move queue never retried it. A
+--         retried file now skips FFmpeg after its first failed attempt, since each run blocks
+--         OBS, and its error is logged once. Screenshots and recordings that could not be
+--         moved now say "Screenshot Not Moved" / "Recording Not Moved" instead of "Saved"
+--   - The Linux update check keeps its temporary file in the per-user runtime folder rather
+--         than under a fixed name in the /tmp shared by every user
+--   - FIX: KDE Plasma on Wayland without DISPLAY no longer turns the cursor into a window
+--         picker and freezes OBS on every save. The KWin call it used was the interactive
+--         "click a window" query, not the active window
+--   - FIX: FFmpeg thumbnails for games with "%" in the name, such as "100% Orange Juice",
+--         no longer leave a stray file and a duplicate on Windows
+--   - FIX: With FFmpeg thumbnails on Windows, a clip whose path has non-ASCII characters (a
+--         Cyrillic user folder, for example) no longer leaves its original and a .thumb.jpg
+--         behind in the OBS folder. Lua's os.remove reads paths in the system code page, not
+--         UTF-8, so these deletes now go through the Windows wide-character API
+--   - FIX: On Linux the screenshot detection cache measured CPU time instead of real time,
+--         so a screenshot taken after alt-tabbing could land in the previous game's folder
+--   - Removed the unused manual update-check code and the orphaned KWin helper
+
 -- CHANGELOG v2.16.0:
 --   - NEW: "Group split recordings into a session folder". When OBS splits a recording, the
 --         parts go into their own folder named after the session start time and are numbered
@@ -290,14 +324,6 @@ function capture_command_output(command)
     pcall(function() pipe:close() end)
     if not output or output == "" then return nil end
     return output
-end
-
-function extract_quoted_value(text, key)
-    if not text or not key then return nil end
-    local pattern = "'" .. key .. "': <'([^']*)'>"
-    local value = string.match(text, pattern)
-    if value and value ~= "" then return value end
-    return nil
 end
 
 local SCRIPT_DIR = (function()
@@ -2965,6 +2991,9 @@ local STATE = {
     recording_folder_name = nil,
     recording_session_stamp = nil,
     recording_split_index = 0,
+    chapter_count = 0,
+    chapter_hotkey_id = nil,
+    failed_moves = {},
 
     -- Notification handles / fonts (GDI)
     notification_hwnd = nil,
@@ -2988,7 +3017,6 @@ local STATE = {
     notification_timer_should_stop = false,
 
     -- Update checker state
-    update_status_msg = "v" .. VERSION,
     startup_update_status = "📦 v" .. VERSION,
     startup_update_check_done = false,
 
@@ -3432,7 +3460,11 @@ local NOTIF = {
 }
 
 -- Update checker state
-local GITHUB_VERSION_FILE = join_path(TEMP_DIR, "smart_replay_mover_update.txt")
+-- On Linux, the per-user runtime dir instead of a fixed name in a /tmp shared by all users.
+local GITHUB_VERSION_FILE = join_path(
+    (not IS_WINDOWS_REAL and get_env_first("XDG_RUNTIME_DIR")) or TEMP_DIR,
+    "smart_replay_mover_update.txt"
+)
 
 -- Check if app is in exclusive fullscreen mode
 local function is_exclusive_fullscreen()
@@ -4441,18 +4473,6 @@ function is_generic_steam_app_identifier(value)
     return string.match(base, "^steam_app_%d+$") ~= nil
 end
 
-function get_active_kwin_window_info()
-    if IS_WINDOWS or os.getenv("XDG_CURRENT_DESKTOP") ~= "KDE" or not command_exists("gdbus") then return nil, nil end
-    local output = capture_command_output("gdbus call --session --dest org.kde.KWin --object-path /KWin --method org.kde.KWin.queryWindowInfo")
-    if not output then return nil, nil end
-    local caption = extract_quoted_value(output, "caption")
-    local resource_class = extract_quoted_value(output, "resourceClass")
-    local resource_name = extract_quoted_value(output, "resourceName")
-    local desktop_file = extract_quoted_value(output, "desktopFile")
-    local process = normalize_detected_process_name(resource_class) or normalize_detected_process_name(resource_name) or normalize_detected_process_name(desktop_file)
-    return process, caption
-end
-
 function get_active_x11_window_info()
     if IS_WINDOWS or not os.getenv("DISPLAY") or not command_exists("xprop") then return nil, nil end
     local root = capture_command_output("xprop -root _NET_ACTIVE_WINDOW")
@@ -4470,7 +4490,6 @@ end
 function get_active_linux_window_info()
     local process, title = get_active_x11_window_info()
     if process or title then return process, title end
-    if not os.getenv("DISPLAY") then return get_active_kwin_window_info() end
     return nil, nil
 end
 
@@ -5179,13 +5198,8 @@ local function run_ffmpeg_thumbnail(ffmpeg_path, src, target, offset)
     -- Build commands with platform-appropriate quoting
     -- Windows: double quotes work in .bat files
     -- Linux: use shell-safe single-quote escaping
-    local function q(path)
-        if IS_WINDOWS then
-            return '"' .. path .. '"'
-        else
-            return quote_shell_arg(path)
-        end
-    end
+    -- On Windows these land in a .bat, so % must be doubled ("100% Orange Juice").
+    local q = quote_task_arg
     
     table.insert(commands, string.format('%s -sseof -%.1f -i %s -vframes 1 -q:v 2 -y %s',
         q(ffmpeg_path), offset, q(src), q(temp_thumb)))
@@ -5235,8 +5249,8 @@ local function run_ffmpeg_thumbnail(ffmpeg_path, src, target, offset)
     -- Run it!
     local task_succeeded = run_task_sync_hidden(commands, unique_id)
     
-    -- Cleanup temp thumb
-    os.remove(temp_thumb)
+    -- Cleanup temp thumb (it sits next to the source, so the path can be non-ASCII)
+    delete_file(temp_thumb)
 
     if not task_succeeded then
         return false
@@ -5339,7 +5353,7 @@ local function move_file(src, folder_name, game_name, media_type, split_info)
                 return true
             end
             target_path = uniquify_path(target_path)
-            if obs.os_rename(src, target_path) then
+            if obs.os_rename(src, target_path) == 0 then
                 log("Renamed (no-folder mode): " .. new_filename)
                 STATE.files_moved = STATE.files_moved + 1
                 return true
@@ -5408,7 +5422,13 @@ local function move_file(src, folder_name, game_name, media_type, split_info)
         local valid, err = validate_path_length(target_path)
         if not valid then
             dbg("Path too long, truncating filename: " .. err)
-            local max_filename_len = WIN.MAX_PATH - #target_dir - 2
+            -- Keep room for the " (99)" that uniquify_path may append below. A folder too deep
+            -- for that is truncated without it; the check after uniquify_path still refuses
+            -- to overwrite, so only a clip whose name is already taken stays behind.
+            local max_filename_len = WIN.MAX_PATH - #target_dir - 2 - 5
+            if max_filename_len < 20 then
+                max_filename_len = max_filename_len + 5
+            end
             if max_filename_len < 20 then
                 log("ERROR: Directory path too long, cannot fit filename: " .. target_dir)
                 return false
@@ -5427,14 +5447,18 @@ local function move_file(src, folder_name, game_name, media_type, split_info)
 
         -- Collision-safe target name (avoid silent overwrite by MoveFileExW)
         target_path = uniquify_path(target_path)
-        local still_valid = validate_path_length(target_path)
-        if not still_valid then
-            dbg("Collision-safe name exceeds MAX_PATH, keeping original target name")
-            target_path = target_dir .. "/" .. new_filename
+        if not validate_path_length(target_path) then
+            -- The original name is taken, which is why uniquify_path picked another one;
+            -- falling back to it would overwrite that clip. Leave this file in place instead.
+            log("ERROR: No free file name fits the path length limit, leaving the file in place: " .. src)
+            return false
         end
 
         -- FFMPEG THUMBNAIL LOGIC
-        if CONFIG.enable_thumbnails and is_video_file(src) and CONFIG.ffmpeg_path ~= "" then
+        -- Not repeated for a file that already failed to move: the deferred queue retries
+        -- every second, and each FFmpeg run blocks OBS until it exits.
+        if CONFIG.enable_thumbnails and is_video_file(src) and CONFIG.ffmpeg_path ~= ""
+           and not STATE.failed_moves[src] then
             log("Attempting to embed thumbnail with FFmpeg...")
             local thumbnail_ok, thumbnail_error = run_ffmpeg_thumbnail(
                 CONFIG.ffmpeg_path, src, target_path, CONFIG.thumbnail_offset
@@ -5444,9 +5468,13 @@ local function move_file(src, folder_name, game_name, media_type, split_info)
                 log("Moved (FFmpeg): " .. new_filename)
                 log("To: " .. target_dir)
                 
-                -- Delete original source file since FFmpeg created a new one
-                os.remove(src)
-                
+                -- Delete original source file since FFmpeg created a new one.
+                -- delete_file, not os.remove: on Windows os.remove fails on non-ASCII paths.
+                delete_file(src)
+                if obs.os_file_exists(src) then
+                    log("WARNING: Could not delete the original after FFmpeg, it is still at: " .. src)
+                end
+
                 STATE.files_moved = STATE.files_moved + 1
                 return true
             else
@@ -5461,13 +5489,14 @@ local function move_file(src, folder_name, game_name, media_type, split_info)
                 end
                 -- Clean up potential failed target file
                 if obs.os_file_exists(target_path) then
-                    os.remove(target_path)
+                    delete_file(target_path)
                 end
             end
         end
 
         -- STANDARD MOVE (Fallback)
-        if obs.os_rename(src, target_path) then
+        if obs.os_rename(src, target_path) == 0 then
+            STATE.failed_moves[src] = nil
             log("Moved: " .. new_filename)
             log("To: " .. target_dir)
             if file_size > 0 then
@@ -5477,9 +5506,13 @@ local function move_file(src, folder_name, game_name, media_type, split_info)
             return true
         end
 
-        log("ERROR: Failed to move file")
-        log("  From: " .. src)
-        log("  To: " .. target_path)
+        -- The deferred queue retries a failed move every second; log the details once.
+        if not STATE.failed_moves[src] then
+            log("ERROR: Failed to move file")
+            log("  From: " .. src)
+            log("  To: " .. target_path)
+            STATE.failed_moves[src] = true
+        end
         return false
     end)
 
@@ -5591,7 +5624,7 @@ local function process_move_queue()
                     -- Trim finished: X deleted, trimmed file is closed and final
                     local candidate = job.trimmed_path
                     if CONFIG.strip_trimmed_suffix and not obs.os_file_exists(job.path) then
-                        if obs.os_rename(job.trimmed_path, job.path) then
+                        if obs.os_rename(job.trimmed_path, job.path) == 0 then
                             candidate = job.path
                             dbg("Stripped _trimmed suffix: " .. job.path)
                         end
@@ -6037,7 +6070,7 @@ local function on_event(event)
 
         elseif event == obs.OBS_FRONTEND_EVENT_SCREENSHOT_TAKEN then
             if CONFIG.organize_screenshots then
-                local now = os.clock()
+                local now = now_ms() / 1000
                 local path = obs.obs_frontend_get_last_screenshot()
 
                 if path then
@@ -6059,11 +6092,15 @@ local function on_event(event)
                         STATE.last_detection_time = now
                     end
 
-                    process_file_with_game(path, folder_name, raw_game, MEDIA.SCREENSHOT)
+                    local moved = process_file_with_game(path, folder_name, raw_game, MEDIA.SCREENSHOT)
 
                     -- Throttle notifications (0.5s) to prevent UI overload
                     if now - STATE.last_screenshot_notify_time > 0.5 then
-                        notify("Screenshot Saved", "Moved to: " .. folder_name)
+                        if moved then
+                            notify("Screenshot Saved", "Moved to: " .. folder_name)
+                        else
+                            notify("Screenshot Not Moved", "File left in place")
+                        end
                         STATE.last_screenshot_notify_time = now
                     end
 
@@ -6073,6 +6110,7 @@ local function on_event(event)
 
 
         elseif event == obs.OBS_FRONTEND_EVENT_RECORDING_STARTING then
+            STATE.chapter_count = 0
             if CONFIG.organize_recordings then
                 local raw_game, window_title, skip_fallback = detect_game()
                 STATE.recording_game_name = raw_game
@@ -6138,13 +6176,18 @@ local function on_event(event)
 
                     if path then
                         log("Recording stopped - organizing file")
+                        local moved
                         if STATE.recording_folder_name then
-                            process_file_with_game(path, STATE.recording_folder_name, STATE.recording_game_name, MEDIA.RECORDING, split)
+                            moved = process_file_with_game(path, STATE.recording_folder_name, STATE.recording_game_name, MEDIA.RECORDING, split)
                         else
-                            process_file(path, MEDIA.RECORDING, split)
+                            moved = process_file(path, MEDIA.RECORDING, split)
                         end
 
-                        notify("Recording Saved", "Moved to: " .. saved_folder)
+                        if moved then
+                            notify("Recording Saved", "Moved to: " .. saved_folder)
+                        else
+                            notify("Recording Not Moved", "File left in place")
+                        end
                     end
                 end
 
@@ -6540,91 +6583,14 @@ local function parse_startup_update_result()
     end
 end
 
-local function parse_update_result()
-    -- This function is called by a timer after check_for_updates initiates a download.
-    -- It reads the downloaded file from the temp directory.
-
-    local file, err = io.open(GITHUB_VERSION_FILE, "r")
-    if not file then
-        -- This can happen if the download failed completely or was blocked,
-        -- resulting in no output file.
-        STATE.update_status_msg = "❌ Check failed: No response"
-        obs.timer_remove(parse_update_result)
-        dbg("Update file not found: " .. tostring(err))
-        if STATE.script_settings then obs.obs_data_set_string(STATE.script_settings, "check_updates_status", STATE.update_status_msg) end
-        return
-    end
-
-    local content = nil
-    local read_ok, read_err = pcall(function()
-        content = file:read("*a")
-        file:close()
-    end)
-    
-    if not read_ok then
-        STATE.update_status_msg = "❌ Check failed: Read error"
-        obs.timer_remove(parse_update_result)
-        dbg("Failed to read update file: " .. tostring(read_err))
-        return
-    end
-    
-    -- The temporary file should be cleaned up immediately after reading.
-    pcall(os.remove, GITHUB_VERSION_FILE)
-
-    -- Robustness check: A valid script file must start with "-- Smart Replay Mover".
-    -- This prevents parsing HTML error pages or other invalid data.
-    if not content or not content:match("^-- Smart Replay Mover") then
-        if content and content:match("404: Not Found") then
-            STATE.update_status_msg = "❌ Check failed: File Not Found (404)"
-        else
-            STATE.update_status_msg = "❌ Check failed: Invalid response"
-        end
-    else
-        -- Try to find the version number in the downloaded script content.
-        local latest_version = content:match("Smart Replay Mover v?(%d+%.%d+%.?[%d]*)")
-        if not latest_version then latest_version = content:match("v(%d+%.%d+%.%d+)") end
-        
-        if latest_version then
-            -- (Version check logic follows)
-            latest_version = latest_version:gsub("^%s*(.-)%s*$", "%1")
-            
-            -- Compare the latest version from GitHub with the current script version.
-            if latest_version == VERSION then
-                STATE.update_status_msg = "✅ You are up to date (v" .. VERSION .. ")"
-            elseif compare_versions(latest_version, VERSION) then
-                STATE.update_status_msg = "🎁 New update: v" .. latest_version .. "!"
-            else
-                -- This case handles when the local version is newer than the one on GitHub,
-                -- which can happen during development or testing.
-                STATE.update_status_msg = "✅ Running test version (v" .. VERSION .. ")"
-            end
-        else
-            -- This happens if the downloaded file is the script but has a malformed version string.
-            STATE.update_status_msg = "❌ Check failed: Cannot parse version"
-        end
-    end
-
-    -- Stop the timer and update the status in the UI.
-    obs.timer_remove(parse_update_result)
-    
-    if STATE.script_settings then
-        obs.obs_data_set_string(STATE.script_settings, "check_updates_status", STATE.update_status_msg)
-    end
-    
-    log("Update Check Result: " .. STATE.update_status_msg)
-
-    -- Toggle the hidden boolean property to trigger the modified callback,
-    -- which returns true and forces a UI refresh.
-    if STATE.script_settings then
-        obs.obs_data_set_bool(STATE.script_settings, "__ui_refresh_trigger", not obs.obs_data_get_bool(STATE.script_settings, "__ui_refresh_trigger"))
-    end
+-- Linux has no PowerShell, so the update check goes through curl or wget instead.
+-- Returns nil on Windows, so nothing here can spawn a visible console there.
+local function linux_update_tool()
+    if kernel32 then return nil end
+    if command_exists("curl") then return "curl" end
+    if command_exists("wget") then return "wget" end
+    return nil
 end
-
--- This callback does nothing but return true, which is a signal to OBS
--- to refresh the script properties UI. We trigger this from our async
--- update check to show the final result without requiring a second click.
-local update_check_in_progress = false
-local button_text = "                  🔄  Check for Updates                  "
 
 -- Callback for refresh button - dynamically updates the status text
 local function refresh_update_status(props, p)
@@ -6648,47 +6614,12 @@ local function open_releases_url(props, p)
     if kernel32 then
         local cmd = 'powershell -WindowStyle Hidden -Command "Start-Process \'' .. GITHUB_RELEASES_URL .. '\'"'
         kernel32.WinExec(cmd, 0)
+    elseif command_exists("xdg-open") then
+        run_shell_command("xdg-open " .. quote_shell_arg(GITHUB_RELEASES_URL) .. " >/dev/null 2>&1 &")
+    else
+        log("Download the update here: " .. GITHUB_RELEASES_URL)
     end
     return false
-end
-
-local function check_for_updates(props, p)
-	if update_check_in_progress then
-		-- If a check is running, a second click should just refresh the UI.
-		-- This will show the final result from the completed check.
-		update_check_in_progress = false
-		button_text = "                  🔄  Check for Updates                  "
-		return true
-	end
-
-	-- Start a new check
-	update_check_in_progress = true
-	button_text = "           ⏳ Checking... (Click again in 5s)           "
-	STATE.update_status_msg = "⏳ Connecting to GitHub..." -- Show status immediately
-
-    -- Force UI refresh by toggling a dummy setting
-    if STATE.script_settings then
-        local dummy = obs.obs_data_get_bool(STATE.script_settings, "__ui_refresh_trigger")
-        obs.obs_data_set_bool(STATE.script_settings, "__ui_refresh_trigger", not dummy)
-    end
-
-	if kernel32 then
-		if obs.os_file_exists(GITHUB_VERSION_FILE) then
-			os.remove(GITHUB_VERSION_FILE)
-		end
-		math.randomseed(os.time())
-		local cache_buster = "?t=" .. tostring(os.time()) .. tostring(math.random(1000, 9999))
-		local url_to_fetch = GITHUB_RAW_URL .. cache_buster
-		local cmd = string.format('powershell -Command "Invoke-WebRequest -Uri \'%s\' -OutFile \'%s\'"', url_to_fetch, GITHUB_VERSION_FILE)
-		kernel32.WinExec(cmd, 0)
-		obs.timer_add(parse_update_result, 4000) -- Increased to 4s
-	else
-		STATE.update_status_msg = "❌ Error: kernel32 missing"
-		update_check_in_progress = false
-		button_text = "                  🔄  Check for Updates                  "
-	end
-
-	return true -- Force UI refresh to show the "Checking..." text on the button
 end
 
 -- Show/hide RBP-specific options depending on the selected mode (modified callback)
@@ -6903,10 +6834,11 @@ function script_properties()
         set_vis("notification_position", is_win)
         set_vis("notify_help", is_win)
 
-        -- Windows-only: update checker (uses powershell + WinExec)
-        set_vis("refresh_status_btn", is_win)
-        set_vis("refresh_hint", is_win)
-        set_vis("open_releases_btn", is_win)
+        -- Update checker: PowerShell on Windows, curl or wget on Linux
+        local can_update = is_win or linux_update_tool() ~= nil
+        set_vis("refresh_status_btn", can_update)
+        set_vis("refresh_hint", can_update)
+        set_vis("open_releases_btn", can_update)
 
         -- Windows-only: FFmpeg path filter mentions .exe
         local ffmpeg_prop = obs.obs_properties_get(props, "ffmpeg_path")
@@ -6942,9 +6874,11 @@ function script_properties()
         hide("notification_scale")
         hide("notification_position")
         hide("notify_help")
-        hide("refresh_status_btn")
-        hide("refresh_hint")
-        hide("open_releases_btn")
+        if not linux_update_tool() then
+            hide("refresh_status_btn")
+            hide("refresh_hint")
+            hide("open_releases_btn")
+        end
     end
 
     return props
@@ -7028,6 +6962,35 @@ local function smart_save_replay(pressed)
     end
 end
 
+-- OBS fires no event for its own "Add Chapter Marker" hotkey, so a script cannot react
+-- to it. This hotkey places the marker itself and reports the result either way.
+local function smart_add_chapter(pressed)
+    if not pressed then return end
+
+    local ok, err = pcall(function()
+        if not obs.obs_frontend_recording_add_chapter then
+            notify("Chapter Not Added", "Needs OBS 30.2 or newer")
+        elseif not obs.obs_frontend_recording_active() then
+            notify("Chapter Not Added", "Recording is not running")
+        elseif obs.obs_frontend_recording_paused() then
+            notify("Chapter Not Added", "Recording is paused")
+        else
+            local n = (STATE.chapter_count or 0) + 1
+            -- Named after the counter so the chapter in the file matches the notification.
+            if obs.obs_frontend_recording_add_chapter("Chapter " .. n) then
+                STATE.chapter_count = n
+                notify("Chapter " .. n, "Marker added")
+            else
+                notify("Chapter Not Added", "Needs Hybrid MP4 or Hybrid MOV")
+            end
+        end
+    end)
+
+    if not ok then
+        log("ERROR in Smart Add Chapter hotkey: " .. tostring(err))
+    end
+end
+
 function script_load(settings)
     -- Reset update status on every load so stale results from previous
     -- sessions don't persist (users would see old "✅ Up to date" forever)
@@ -7068,6 +7031,18 @@ function script_load(settings)
     end
     dbg("Smart Save Replay hotkey registered")
 
+    STATE.chapter_hotkey_id = obs.obs_hotkey_register_frontend(
+        "smart_add_chapter",
+        "Smart Add Chapter Marker (With Notification)",
+        smart_add_chapter
+    )
+    local chapter_save_array = obs.obs_data_get_array(settings, "smart_add_chapter_hotkey")
+    if chapter_save_array then
+        obs.obs_hotkey_load(STATE.chapter_hotkey_id, chapter_save_array)
+        obs.obs_data_array_release(chapter_save_array)
+    end
+    dbg("Smart Add Chapter Marker hotkey registered")
+
     local exact_count = 0
     for _ in pairs(CUSTOM_NAMES_EXACT) do exact_count = exact_count + 1 end
     local custom_count = exact_count + #CUSTOM_NAMES_KEYWORDS + #CUSTOM_NAMES_CONTAINS
@@ -7085,6 +7060,7 @@ function script_load(settings)
         " | Fallback: " .. CONFIG.fallback_folder)
     
     -- AUTO UPDATE CHECK (runs async, result ready by UI open)
+    local linux_tool = linux_update_tool()
     if kernel32 then
         pcall(function()
             if obs.os_file_exists(GITHUB_VERSION_FILE) then
@@ -7099,6 +7075,22 @@ function script_load(settings)
             kernel32.WinExec(cmd, 0)
             obs.timer_add(parse_startup_update_result, 4000)
             dbg("Auto update check started")
+        end)
+    elseif linux_tool then
+        pcall(function()
+            -- A leftover file from an earlier session would be parsed if this download failed.
+            if obs.os_file_exists(GITHUB_VERSION_FILE) then
+                os.remove(GITHUB_VERSION_FILE)
+            end
+            math.randomseed(os.time())
+            local url = GITHUB_RAW_URL .. "?t=" .. os.time() .. math.random(1000, 9999)
+            local out = quote_shell_arg(GITHUB_VERSION_FILE)
+            local cmd = linux_tool == "curl"
+                and ("curl -fsSL --max-time 15 -o " .. out .. " " .. quote_shell_arg(url))
+                or ("wget -q -T 15 -O " .. out .. " " .. quote_shell_arg(url))
+            run_shell_command(cmd .. " </dev/null >/dev/null 2>&1 &")
+            obs.timer_add(parse_startup_update_result, 4000)
+            dbg("Auto update check started (" .. linux_tool .. ")")
         end)
     else
         STATE.startup_update_status = "⚠️ Check unavailable"
@@ -7118,6 +7110,11 @@ function script_save(settings)
         local hotkey_save_array = obs.obs_hotkey_save(smart_save_hotkey_id)
         obs.obs_data_set_array(settings, "smart_save_replay_hotkey", hotkey_save_array)
         obs.obs_data_array_release(hotkey_save_array)
+    end
+    if STATE.chapter_hotkey_id then
+        local chapter_save_array = obs.obs_hotkey_save(STATE.chapter_hotkey_id)
+        obs.obs_data_set_array(settings, "smart_add_chapter_hotkey", chapter_save_array)
+        obs.obs_data_array_release(chapter_save_array)
     end
 end
 
@@ -7154,12 +7151,13 @@ function script_unload()
     STATE.recording_folder_name = nil
     STATE.recording_session_stamp = nil
     STATE.recording_split_index = 0
+    STATE.chapter_count = 0
 
     log("Session: " .. STATE.files_moved .. " moved, " .. STATE.files_skipped .. " skipped")
 end
 
 -- ============================================================================
--- END OF SCRIPT v2.16.0
+-- END OF SCRIPT v2.20.0
 -- Copyright (C) 2025-2026 SlonickLab - Licensed under GPL v3
 -- https://github.com/SlonickLab/Smart-Replay-Mover
 -- ============================================================================

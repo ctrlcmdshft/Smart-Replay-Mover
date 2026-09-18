@@ -6,7 +6,7 @@
 
   **Automatically organize your Replay Buffer clips, Recordings, and Screenshots into game-specific folders.**
 
-  [![Version](https://img.shields.io/badge/version-2.13.0-00d4aa.svg)](https://github.com/SlonickLab/Smart-Replay-Mover/releases)
+  [![Version](https://img.shields.io/badge/version-2.20.0-00d4aa.svg)](https://github.com/SlonickLab/Smart-Replay-Mover/releases)
   [![License](https://img.shields.io/badge/license-GPL%20v3-blue.svg)](LICENSE)
   [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078D6.svg)]()
   [![OBS](https://img.shields.io/badge/OBS-28.x+-302E31.svg)](https://obsproject.com/)
@@ -23,7 +23,7 @@
 
   Smart Replay Mover is a single **Lua script** that you add to OBS. It requires no Python, no libraries, and no external dependencies.
 
-  Instead of only checking what OBS is recording, it uses OS-level APIs (Win32 FFI on Windows, `xprop`/`gdbus` on Linux) to detect the active window focus. This allows it to correctly sort files even if you're using Display Capture, Borderless Windowed modes, or playing games with strict anti-cheat.
+  Instead of only checking what OBS is recording, it uses OS-level APIs (Win32 FFI on Windows, `xprop` on Linux) to detect the active window focus. This allows it to correctly sort files even if you're using Display Capture, Borderless Windowed modes, or playing games with strict anti-cheat.
 
   <div align="center">
 
@@ -42,7 +42,7 @@
 
 ### 🎯 Intelligent Game Detection
 
-- **Cross-Platform Detection** — Uses Windows API (Win32 FFI) or Linux tools (`xprop`, `gdbus`) to detect the active game
+- **Cross-Platform Detection** — Uses Windows API (Win32 FFI) or `xprop` on Linux to detect the active game
 - **1900+ Built-in Games** — Massive embedded database, no external files needed
 - **Auto-Pattern Matching** — `minecraft_1.20.exe` → Saves to `Minecraft`
 - **Anti-Cheat Compatible** — Window title fallback for protected games (Valorant, Fortnite, Sea of Thieves)
@@ -77,9 +77,10 @@
 - **🧩 Folder Templates** — Organize into any structure with `{game}`, `{type}`, `{yearmonth}`, `{date}` and more tokens
 - **230+ Ignored Programs** — Won't confuse Discord, Chrome, launchers or utilities with games
 - **⚡ Smart Save Hotkey** — Instant "Saving..." notification when pressing your custom hotkey
+- **📑 Chapter Marker Hotkey** — Places a chapter marker in your recording and confirms it with a notification
 - **📂 No-Folder Mode** — Map a process to `/`, `\`, or `.` to keep files in OBS output root
 - **📦 Import/Export** — Share your custom name mappings with one click
-- **🔄 Auto-Update Check** — Notifies you when a new version is available
+- **🔄 Auto-Update Check** — Notifies you when a new version is available (Windows & Linux)
 
   ---
 
@@ -119,11 +120,11 @@
 - `notify-send` — desktop notifications
 - `paplay` / `pw-play` — notification sound
 - `ffmpeg` / `ffprobe` — video thumbnails (both come from the same package)
-- Also checks for `gdbus` (KDE Wayland support)
+- Also checks for `curl` or `wget` (update check)
 
   1. **Done!** The script auto-detects Linux — no configuration needed.
 
-  > 💡 On **KDE Plasma (Wayland)**, game detection uses `gdbus` which is included with GNOME/KDE — no extra install needed.
+  > 💡 On **Wayland**, detection works for games that run through XWayland, which includes everything under Proton. Windows running natively on Wayland can't be read, so those clips go to the fallback folder.
 
   <details>
   <summary>Manual installation (if you prefer)</summary>
@@ -146,7 +147,7 @@
   ```
   ┌─────────────────────────────────────────────────────────────────┐
   │  Priority 1: Custom Names (your rules — ALWAYS highest)        │
-  │  Priority 2: Active process name (Win32 / xprop / gdbus)       │
+  │  Priority 2: Active process name (Win32 / xprop)               │
   │  Priority 3: Built-in game database (1900+ games)              │
   │  Priority 4: Pattern matching (auto-clean process names)       │
   │  Priority 5: Window title fallback (anti-cheat bypass)         │
@@ -356,6 +357,23 @@
 
   Notifications use `notify-send` for visual alerts and `paplay`/`pw-play` for sound. Works with any desktop environment.
 
+### 📑 Chapter Markers
+
+  OBS has its own "Add Chapter Marker" hotkey, but it gives no feedback, and it silently does nothing when the recording format doesn't support chapters. The script adds a hotkey that places the marker and tells you what happened.
+
+  1. Open OBS **Settings → Hotkeys** and find **Smart Add Chapter Marker (With Notification)**
+  2. Bind your key there
+  3. If you had OBS's own **Add Chapter Marker** bound, unbind it — otherwise one press adds two chapters
+
+  Markers are named **Chapter 1**, **Chapter 2** and so on, matching the notification. OBS also adds its own marker at the very start of the file, so your player lists that one first. When a marker can't be added, the notification says why:
+
+  | Message | Why |
+  |---------|-----|
+  | Recording is not running | Chapters only exist in recordings |
+  | Recording is paused | OBS doesn't place chapters while paused |
+  | Needs Hybrid MP4 or Hybrid MOV | Chapters need one of these recording formats (Settings → Output → Recording Format) |
+  | Needs OBS 30.2 or newer | Chapter markers were added to OBS in version 30.2 |
+
 ### 🔊 Custom Notification Sound
 
   1. Find a short sound file (1–2 seconds recommended)
@@ -546,6 +564,17 @@
   ---
 
 ## 📋 Changelog
+
+### v2.20.0 — 📑 Chapter Markers & Safer Moves
+
+- **📑 Chapter marker hotkey.** A new **Smart Add Chapter Marker** hotkey places a chapter in your recording and shows a notification. It also tells you when a marker wasn't added and why, which OBS's own hotkey never does: it silently skips recordings in formats without chapter support. Bind it instead of OBS's **Add Chapter Marker**, not alongside it. See [Chapter Markers](#-chapter-markers). ([Issue #38](https://github.com/SlonickLab/Smart-Replay-Mover/issues/38), thanks @Besdroxk)
+- **🐧 Update check on Linux.** The update check only ever worked on Windows, so Linux users were never told about new versions and the settings just said "Check unavailable". It now works through `curl` or `wget`, and the download button opens the releases page. ([Issue #37](https://github.com/SlonickLab/Smart-Replay-Mover/issues/37), thanks @TheFloatingCloud40)
+- **🛡️ Clips can no longer overwrite each other.** When a clip's path came close to the 260-character path limit, the script shortened the end of the file name, which is where the timestamp lives, so later clips of the same game ended up with the same name. If the collision-safe " (2)" name didn't fit either, it fell back to the taken name and replaced the older clip. It now keeps room for that suffix, and in the rare case that nothing fits, the clip stays in the OBS folder instead.
+- **🛡️ Failed moves are reported honestly.** A move that failed, for example on a locked file or a folder on another drive, was still logged as done and showed "Clip Saved", so the clip quietly stayed in the OBS folder. Failures are now logged as errors, and the popup says so too. A replay is retried for up to two minutes in case the file was only briefly locked, then shows "Move Failed". Screenshots and recordings show "Screenshot Not Moved" or "Recording Not Moved" instead of "Saved".
+- **🐧 No more freeze on KDE Wayland.** On KDE Plasma without an X display, every save turned the cursor into a crosshair and froze OBS for up to 25 seconds. The call it used was KDE's "click a window to inspect it" picker rather than a way to find the active window, so it has been removed. Those saves now go to the fallback folder without the freeze. Before, they only landed in the right folder if you clicked the game window while the crosshair was showing.
+- **🖼️ Thumbnails for games with "%" in the name.** On Windows, FFmpeg thumbnails for games like *100% Orange Juice* left a stray file and a duplicate clip behind. The name now reaches FFmpeg intact.
+- **🖼️ No leftovers with non-English folder names.** On Windows, when a clip's path had letters outside English, such as a Cyrillic or accented user name, FFmpeg thumbnails left the original clip and a `.thumb.jpg` behind in the OBS folder, next to the finished copy in the game folder. Those files are now deleted properly.
+- **🐧 Screenshots after alt-tab on Linux.** The short screenshot cache counted CPU time instead of real time on Linux, so a screenshot taken right after switching games could land in the previous game's folder.
 
 ### v2.16.0 — 🎞️ Grouped Split Recordings
 
